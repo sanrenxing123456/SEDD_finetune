@@ -97,6 +97,12 @@ python train.py noise_lib=geometric graph.type=uniform model=small model.scale_b
 
 ## Other Features
 
+### Supervised fine-tuning on s1K-1.1
+
+An end-to-end conditional SEDD baseline (data preparation, supervised training,
+held-out evaluation, and block-wise generation) is documented in
+[`SFT.md`](SFT.md).
+
 ### SLURM compatibility
 
 To train on slurm, simply run 
