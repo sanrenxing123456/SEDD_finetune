@@ -39,7 +39,9 @@ For a quick pipeline smoke test, limit the number of blocks per question:
 python prepare_s1.py --max_chunks_per_example 2
 ```
 
-This truncates long traces and should not be used for the final experiment.
+When a response exceeds the cap, preprocessing keeps the first `N - 1` blocks
+and the final answer/EOS block. This is useful for a medium-scale experiment,
+but omitted middle reasoning should still be restored for the final experiment.
 
 ## 2. Train
 

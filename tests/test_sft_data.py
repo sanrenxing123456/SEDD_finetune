@@ -1,6 +1,11 @@
 import unittest
 
-from sft.data import build_chunk_record, build_inference_record, extract_s1_text
+from sft.data import (
+    build_chunk_record,
+    build_inference_record,
+    expand_split,
+    extract_s1_text,
+)
 
 
 class TinyTokenizer:
@@ -61,6 +66,28 @@ class SFTDataTest(unittest.TestCase):
         )
         self.assertEqual(sum(not item for item in record["condition_mask"]), 8)
         self.assertEqual(len(record["input_ids"]), 32)
+
+    def test_capped_dataset_always_keeps_final_chunk(self):
+        rows = [
+            (
+                7,
+                {
+                    "question": "Q",
+                    "deepseek_thinking_trajectory": "abcdefghijklmno",
+                },
+            )
+        ]
+        records, skipped = expand_split(
+            rows=rows,
+            tokenizer=self.tokenizer,
+            max_length=32,
+            target_length=4,
+            max_question_tokens=8,
+            max_chunks_per_example=2,
+        )
+        self.assertEqual(skipped, 0)
+        self.assertEqual([record["chunk_index"] for record in records], [0, 3])
+        self.assertEqual([record["is_final"] for record in records], [False, True])
 
 
 if __name__ == "__main__":

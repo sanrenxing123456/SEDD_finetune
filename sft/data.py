@@ -191,9 +191,17 @@ def expand_split(
         if response_ids[-1] != tokenizer.eos_token_id:
             response_ids.append(tokenizer.eos_token_id)
         num_chunks = (len(response_ids) + target_length - 1) // target_length
-        if max_chunks_per_example > 0:
-            num_chunks = min(num_chunks, max_chunks_per_example)
-        for chunk_index in range(num_chunks):
+        chunk_indices = list(range(num_chunks))
+        if max_chunks_per_example > 0 and num_chunks > max_chunks_per_example:
+            # Preserve a contiguous reasoning prefix while always retaining the
+            # final answer/EOS block. Without this, capped datasets almost never
+            # teach the model how to finish an answer.
+            if max_chunks_per_example == 1:
+                chunk_indices = [num_chunks - 1]
+            else:
+                chunk_indices = list(range(max_chunks_per_example - 1))
+                chunk_indices.append(num_chunks - 1)
+        for chunk_index in chunk_indices:
             records.append(
                 build_chunk_record(
                     tokenizer=tokenizer,
