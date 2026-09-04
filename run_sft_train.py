@@ -4,6 +4,7 @@ import argparse
 import math
 import os
 import random
+import re
 import time
 
 import numpy as np
@@ -86,7 +87,17 @@ def evaluate(model, noise, graph, loader, cfg, device):
     }
 
 
-def save_checkpoint(path, model, optimizer, scheduler, ema, cfg, epoch, step):
+def save_checkpoint(
+    path,
+    model,
+    optimizer,
+    scheduler,
+    ema,
+    cfg,
+    epoch,
+    step,
+    next_batch_index=0,
+):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {
         "model": model.state_dict(),
@@ -97,10 +108,25 @@ def save_checkpoint(path, model, optimizer, scheduler, ema, cfg, epoch, step):
         "pretrained_model": cfg.pretrained_model,
         "epoch": epoch,
         "step": step,
+        "next_batch_index": next_batch_index,
     }
     temporary_path = path + ".tmp"
     torch.save(payload, temporary_path)
     os.replace(temporary_path, path)
+
+
+def prune_step_checkpoints(output_dir, keep):
+    """Keep only the newest numbered checkpoints after a successful save."""
+    if keep < 1:
+        raise ValueError("training.keep_step_checkpoints must be at least 1")
+    candidates = []
+    for filename in os.listdir(output_dir):
+        match = re.fullmatch(r"checkpoint_(\d+)\.pt", filename)
+        if match:
+            candidates.append((int(match.group(1)), os.path.join(output_dir, filename)))
+    candidates.sort()
+    for _, path in candidates[:-keep]:
+        os.remove(path)
 
 
 def main():
@@ -157,6 +183,7 @@ def main():
     ema = ExponentialMovingAverage(model.parameters(), decay=cfg.training.ema)
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.precision == "fp16")
     start_epoch = 0
+    resume_batch_index = 0
     global_step = 0
 
     if cfg.training.resume_from:
@@ -167,18 +194,41 @@ def main():
         ema.load_state_dict(checkpoint["ema"])
         start_epoch = checkpoint["epoch"]
         global_step = checkpoint["step"]
+        if "next_batch_index" in checkpoint:
+            resume_batch_index = checkpoint["next_batch_index"]
+        else:
+            # Backward compatibility with checkpoints created before batch
+            # position tracking was added. Periodic checkpoints are saved only
+            # at optimizer boundaries, so this inference is exact except for a
+            # possibly shorter final accumulation group.
+            completed_updates = global_step - start_epoch * updates_per_epoch
+            resume_batch_index = min(
+                max(completed_updates, 0)
+                * cfg.training.gradient_accumulation_steps,
+                len(train_loader),
+            )
+        if resume_batch_index >= len(train_loader):
+            start_epoch += 1
+            resume_batch_index = 0
+        print(
+            f"Resuming from step={global_step}, epoch={start_epoch + 1}, "
+            f"batch_index={resume_batch_index}"
+        )
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     OmegaConf.save(cfg, os.path.join(cfg.output_dir, "config.yaml"))
     optimizer.zero_grad(set_to_none=True)
     accumulation = cfg.training.gradient_accumulation_steps
     num_time_samples = cfg.training.get("time_samples_per_example", 1)
+    keep_step_checkpoints = cfg.training.get("keep_step_checkpoints", 2)
     if num_time_samples < 1:
         raise ValueError("training.time_samples_per_example must be at least 1")
     started = time.time()
 
     for epoch in range(start_epoch, cfg.training.epochs):
         for batch_index, batch in enumerate(train_loader):
+            if epoch == start_epoch and batch_index < resume_batch_index:
+                continue
             batch = move_batch(batch, device)
             group_start = (batch_index // accumulation) * accumulation
             group_size = min(accumulation, len(train_loader) - group_start)
@@ -244,7 +294,9 @@ def main():
                     cfg,
                     epoch,
                     global_step,
+                    next_batch_index=batch_index + 1,
                 )
+                prune_step_checkpoints(cfg.output_dir, keep_step_checkpoints)
 
         save_checkpoint(
             os.path.join(cfg.output_dir, "checkpoint_last.pt"),
@@ -255,7 +307,9 @@ def main():
             cfg,
             epoch + 1,
             global_step,
+            next_batch_index=0,
         )
+        resume_batch_index = 0
 
 
 if __name__ == "__main__":

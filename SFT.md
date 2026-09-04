@@ -64,6 +64,11 @@ gradient accumulation, mixed precision, validation, periodic checkpoints, and
 resume support. The original SEDD model requires a CUDA-compatible Flash
 Attention installation.
 
+Periodic checkpoints record the next dataloader batch, so an interrupted epoch
+can continue without replaying its completed prefix. Only the two newest
+numbered checkpoints are retained by default to limit disk usage; configure
+this with `training.keep_step_checkpoints`.
+
 By default, each training record independently samples 10 diffusion times and
 10 corresponding corruptions. Their losses are averaged before the optimizer
 update. They are evaluated sequentially, so activation memory stays close to a
