@@ -56,25 +56,33 @@ def move_batch(batch, device):
 def evaluate(model, noise, graph, loader, cfg, device):
     model.eval()
     losses = []
-    accuracies = []
+    total_correct = torch.zeros((), device=device)
+    total_masked = torch.zeros((), device=device)
+    num_time_samples = cfg.training.get("eval_time_samples_per_example", 1)
     for batch_index, batch in enumerate(loader):
         if batch_index >= cfg.training.max_eval_batches:
             break
         batch = move_batch(batch, device)
-        with autocast_context(cfg.training.precision):
-            loss, metrics = conditional_score_entropy(
-                model,
-                noise,
-                graph,
-                **batch,
-                sampling_eps=cfg.training.sampling_eps,
-            )
-        losses.append(loss.float())
-        accuracies.append(metrics["denoise_accuracy"].float())
+        batch_loss = torch.zeros((), device=device)
+        for _ in range(num_time_samples):
+            with autocast_context(cfg.training.precision):
+                loss, metrics = conditional_score_entropy(
+                    model,
+                    noise,
+                    graph,
+                    **batch,
+                    sampling_eps=cfg.training.sampling_eps,
+                )
+            batch_loss += loss.float() / num_time_samples
+            total_correct += metrics["correct_tokens"].float()
+            total_masked += metrics["masked_tokens"].float()
+        losses.append(batch_loss)
     model.train()
+    if not losses:
+        raise ValueError("Evaluation loader produced no batches")
     return {
         "loss": torch.stack(losses).mean().item(),
-        "denoise_accuracy": torch.stack(accuracies).mean().item(),
+        "denoise_accuracy": (total_correct / total_masked.clamp_min(1)).item(),
     }
 
 
@@ -164,6 +172,9 @@ def main():
     OmegaConf.save(cfg, os.path.join(cfg.output_dir, "config.yaml"))
     optimizer.zero_grad(set_to_none=True)
     accumulation = cfg.training.gradient_accumulation_steps
+    num_time_samples = cfg.training.get("time_samples_per_example", 1)
+    if num_time_samples < 1:
+        raise ValueError("training.time_samples_per_example must be at least 1")
     started = time.time()
 
     for epoch in range(start_epoch, cfg.training.epochs):
@@ -171,16 +182,24 @@ def main():
             batch = move_batch(batch, device)
             group_start = (batch_index // accumulation) * accumulation
             group_size = min(accumulation, len(train_loader) - group_start)
-            with autocast_context(cfg.training.precision):
-                loss, metrics = conditional_score_entropy(
-                    model,
-                    noise,
-                    graph,
-                    **batch,
-                    sampling_eps=cfg.training.sampling_eps,
-                )
-                scaled_loss = loss / group_size
-            scaler.scale(scaled_loss).backward()
+            sample_loss = torch.zeros((), device=device)
+            sample_correct = torch.zeros((), device=device)
+            sample_masked = torch.zeros((), device=device)
+            for _ in range(num_time_samples):
+                with autocast_context(cfg.training.precision):
+                    loss, metrics = conditional_score_entropy(
+                        model,
+                        noise,
+                        graph,
+                        **batch,
+                        sampling_eps=cfg.training.sampling_eps,
+                    )
+                    scaled_loss = loss / (group_size * num_time_samples)
+                scaler.scale(scaled_loss).backward()
+                sample_loss += loss.detach().float() / num_time_samples
+                sample_correct += metrics["correct_tokens"].float()
+                sample_masked += metrics["masked_tokens"].float()
+            sample_accuracy = sample_correct / sample_masked.clamp_min(1)
 
             is_update = (batch_index + 1) % accumulation == 0 or (
                 batch_index + 1 == len(train_loader)
@@ -199,8 +218,9 @@ def main():
             if global_step % cfg.training.log_every == 0:
                 elapsed = time.time() - started
                 print(
-                    f"step={global_step} epoch={epoch + 1} loss={loss.item():.5f} "
-                    f"accuracy={metrics['denoise_accuracy'].item():.4f} "
+                    f"step={global_step} epoch={epoch + 1} loss={sample_loss.item():.5f} "
+                    f"accuracy={sample_accuracy.item():.4f} "
+                    f"time_samples={num_time_samples} "
                     f"lr={scheduler.get_last_lr()[0]:.3e} elapsed={elapsed:.1f}s"
                 )
 

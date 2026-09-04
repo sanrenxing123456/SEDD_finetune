@@ -64,6 +64,22 @@ gradient accumulation, mixed precision, validation, periodic checkpoints, and
 resume support. The original SEDD model requires a CUDA-compatible Flash
 Attention installation.
 
+By default, each training record independently samples 10 diffusion times and
+10 corresponding corruptions. Their losses are averaged before the optimizer
+update. They are evaluated sequentially, so activation memory stays close to a
+single time sample while training compute is approximately 10 times larger.
+Configure this with:
+
+```yaml
+training:
+  time_samples_per_example: 10
+  eval_time_samples_per_example: 10
+```
+
+Setting either value to `1` recovers the original single-time Monte Carlo
+estimator. Evaluation accuracy is aggregated over the actual number of masked
+target tokens rather than averaging per-batch percentages.
+
 ## 3. Evaluate and generate
 
 Evaluate conditional score entropy and masked-token denoising accuracy:

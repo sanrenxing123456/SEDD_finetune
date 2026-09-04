@@ -52,6 +52,7 @@ def conditional_score_entropy(
 
     metrics = {
         "denoise_accuracy": accuracy.detach(),
+        "correct_tokens": correct.detach(),
         "masked_tokens": count.detach(),
         "mean_t": t.mean().detach(),
     }
