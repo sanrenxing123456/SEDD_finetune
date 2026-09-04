@@ -97,6 +97,7 @@ def save_checkpoint(
     epoch,
     step,
     next_batch_index=0,
+    best_validation_loss=None,
 ):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {
@@ -109,6 +110,24 @@ def save_checkpoint(
         "epoch": epoch,
         "step": step,
         "next_batch_index": next_batch_index,
+        "best_validation_loss": best_validation_loss,
+    }
+    temporary_path = path + ".tmp"
+    torch.save(payload, temporary_path)
+    os.replace(temporary_path, path)
+
+
+def save_best_checkpoint(path, model, cfg, epoch, step, validation_metrics):
+    """Save EMA model weights without optimizer state for evaluation/inference."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "model": model.state_dict(),
+        "config": OmegaConf.to_container(cfg, resolve=True),
+        "pretrained_model": cfg.pretrained_model,
+        "epoch": epoch,
+        "step": step,
+        "validation": validation_metrics,
+        "weights": "ema",
     }
     temporary_path = path + ".tmp"
     torch.save(payload, temporary_path)
@@ -185,15 +204,24 @@ def main():
     start_epoch = 0
     resume_batch_index = 0
     global_step = 0
+    best_validation_loss = float("inf")
 
     if cfg.training.resume_from:
         checkpoint = torch.load(cfg.training.resume_from, map_location=device)
+        if "optimizer" not in checkpoint:
+            raise ValueError(
+                "The selected checkpoint is weights-only and cannot resume training; "
+                "use checkpoint_last.pt or a numbered checkpoint instead"
+            )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         ema.load_state_dict(checkpoint["ema"])
         start_epoch = checkpoint["epoch"]
         global_step = checkpoint["step"]
+        saved_best = checkpoint.get("best_validation_loss")
+        if saved_best is not None:
+            best_validation_loss = saved_best
         if "next_batch_index" in checkpoint:
             resume_batch_index = checkpoint["next_batch_index"]
         else:
@@ -278,6 +306,23 @@ def main():
                 ema.store(model.parameters())
                 ema.copy_to(model.parameters())
                 values = evaluate(model, noise, graph, validation_loader, cfg, device)
+                if (
+                    cfg.training.get("save_best", True)
+                    and values["loss"] < best_validation_loss
+                ):
+                    best_validation_loss = values["loss"]
+                    save_best_checkpoint(
+                        os.path.join(cfg.output_dir, "best.pt"),
+                        model,
+                        cfg,
+                        epoch,
+                        global_step,
+                        values,
+                    )
+                    print(
+                        f"saved best.pt at step={global_step} "
+                        f"validation_loss={best_validation_loss:.5f}"
+                    )
                 ema.restore(model.parameters())
                 print(
                     f"validation step={global_step} loss={values['loss']:.5f} "
@@ -295,6 +340,7 @@ def main():
                     epoch,
                     global_step,
                     next_batch_index=batch_index + 1,
+                    best_validation_loss=best_validation_loss,
                 )
                 prune_step_checkpoints(cfg.output_dir, keep_step_checkpoints)
 
@@ -308,6 +354,7 @@ def main():
             epoch + 1,
             global_step,
             next_batch_index=0,
+            best_validation_loss=best_validation_loss,
         )
         resume_batch_index = 0
 

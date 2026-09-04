@@ -22,6 +22,7 @@ training:
   eval_every: 250
   save_every: 250
   keep_step_checkpoints: 2
+  save_best: true
   max_eval_batches: 50
   resume_from: null
 
